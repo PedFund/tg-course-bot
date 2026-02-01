@@ -25,25 +25,19 @@ def get_sheets_client():
 
 # --- Логика таблицы ---
 
-def find_user_by_id(user_id):
-    try:
-        client = get_sheets_client()
-        sheet = client.open_by_key(SHEET_ID).worksheet("Users")
-        cell = sheet.find(str(user_id), in_column=2) 
-        return cell if cell else None
-    except:
-        return None
-
-def update_user_progress(user_id, day):
-    """Записывает текущий день в колонку E (5)"""
+def get_user_data(user_id):
+    """Возвращает статус пользователя и его строку в таблице"""
     try:
         client = get_sheets_client()
         sheet = client.open_by_key(SHEET_ID).worksheet("Users")
         cell = sheet.find(str(user_id), in_column=2)
         if cell:
-            sheet.update_cell(cell.row, 5, str(day))
-    except Exception as e:
-        print(f"Ошибка обновления прогресса: {e}")
+            # Получаем статус из колонки D (4)
+            status = sheet.cell(cell.row, 4).value
+            return {"row": cell.row, "status": status, "sheet": sheet}
+        return None
+    except:
+        return None
 
 def authorize_by_phone(phone, user_id):
     try:
@@ -55,6 +49,7 @@ def authorize_by_phone(phone, user_id):
             status = sheet.cell(cell.row, 4).value
             if status == 'blocked':
                 return "blocked"
+            # Записываем user_id
             sheet.update_cell(cell.row, 2, str(user_id))
             return "success"
         return "not_found"
@@ -65,7 +60,12 @@ def authorize_by_phone(phone, user_id):
 
 @dp.message(F.text == "/start")
 async def cmd_start(message: types.Message):
-    if find_user_by_id(message.from_user.id):
+    user_info = get_user_data(message.from_user.id)
+    
+    if user_info:
+        if user_info["status"] == "blocked":
+            await message.answer("❌ Ваш доступ к материалам курса заблокирован.")
+            return
         await message.answer("С возвращением! Продолжаем обучение.")
         await send_step(message.from_user.id, 1, 1)
     else:
@@ -86,15 +86,21 @@ async def handle_contact(message: types.Message):
         await message.answer("✅ Доступ подтвержден! Начинаем.", reply_markup=ReplyKeyboardRemove())
         await send_step(user_id, 1, 1)
     elif result == "blocked":
-        await message.answer("❌ Ваш доступ временно заблокирован.")
+        await message.answer("❌ Ваш доступ заблокирован.")
     else:
         await message.answer("🚫 Вашего номера нет в списке. Если это ошибка — напишите админу @kpp_all")
 
 async def send_step(user_id, day, step):
     try:
+        # Проверка блокировки перед каждым шагом
+        user_info = get_user_data(user_id)
+        if not user_info or user_info["status"] == "blocked":
+            await bot.send_message(user_id, "❌ Доступ ограничен.")
+            return
+
         client = get_sheets_client()
-        sheet = client.open_by_key(SHEET_ID).worksheet("Content")
-        records = sheet.get_all_records()
+        content_sheet = client.open_by_key(SHEET_ID).worksheet("Content")
+        records = content_sheet.get_all_records()
         
         data = next((r for r in records if str(r['day']) == str(day) and str(r['step']) == str(step)), None)
         
@@ -110,11 +116,12 @@ async def send_step(user_id, day, step):
                 [InlineKeyboardButton(text="Далее ➡️", callback_data=f"next:{day}:{int(step)+1}")]
             ])
         )
-        # Обновляем прогресс в таблице Users
-        update_user_progress(user_id, day)
+        
+        # Обновляем прогресс (день) в колонке E (5)
+        user_info["sheet"].update_cell(user_info["row"], 5, str(day))
         
     except Exception as e:
-        await bot.send_message(user_id, "Произошла ошибка при загрузке контента.")
+        await bot.send_message(user_id, "Ошибка при загрузке контента.")
 
 @dp.callback_query(F.data.startswith("next:"))
 async def handle_next(callback: types.CallbackQuery):
