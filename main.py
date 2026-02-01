@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import gspread
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types, F
@@ -18,6 +19,7 @@ app = FastAPI()
 
 def get_sheets_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    # Парсим JSON прямо здесь
     creds_dict = json.loads(G_CREDS_INFO)
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     return gspread.authorize(creds)
@@ -25,31 +27,31 @@ def get_sheets_client():
 # --- Логика авторизации ---
 
 def find_user_by_id(user_id):
-    """Ищет, есть ли уже такой ID в таблице"""
-    client = get_sheets_client()
-    sheet = client.open_by_key(SHEET_ID).worksheet("Users")
-    cell = sheet.find(str(user_id), in_column=2) # Колонку B (user_id)
-    return cell if cell else None
+    try:
+        client = get_sheets_client()
+        sheet = client.open_by_key(SHEET_ID).worksheet("Users")
+        cell = sheet.find(str(user_id), in_column=2) 
+        return cell if cell else None
+    except:
+        return None
 
 def authorize_by_phone(phone, user_id):
-    """Ищет телефон и вписывает ID"""
-    client = get_sheets_client()
-    sheet = client.open_by_key(SHEET_ID).worksheet("Users")
-    # Очищаем телефон от + и пробелов
-    clean_phone = phone.replace("+", "").strip()
-    
-    # Ищем телефон в колонке A
-    cell = sheet.find(clean_phone, in_column=1)
-    if cell:
-        # Проверяем статус в колонке D (4-я колонка)
-        status = sheet.cell(cell.row, 4).value
-        if status == 'blocked':
-            return "blocked"
-        
-        # Вписываем user_id в колонку B того же ряда
-        sheet.update_cell(cell.row, 2, str(user_id))
-        return "success"
-    return "not_found"
+    try:
+        client = get_sheets_client()
+        sheet = client.open_by_key(SHEET_ID).worksheet("Users")
+        clean_phone = phone.replace("+", "").strip()
+        cell = sheet.find(clean_phone, in_column=1)
+        if cell:
+            # Получаем статус (4-я колонка)
+            status = sheet.cell(cell.row, 4).value
+            if status == 'blocked':
+                return "blocked"
+            # Записываем ID (2-я колонка)
+            sheet.update_cell(cell.row, 2, str(user_id))
+            return "success"
+        return "not_found"
+    except:
+        return "error"
 
 # --- Обработка команд ---
 
@@ -59,8 +61,7 @@ async def cmd_start(message: types.Message):
         await message.answer("С возвращением! Продолжаем обучение.")
         await send_step(message.from_user.id, 1, 1)
     else:
-        # Кнопка запроса телефона
-        btn = [[KeyboardButton(text="📱 Подтвердить доступ по номеру", request_contact=True)]]
+        btn = [[KeyboardButton(text="📱 Подтвердить номер", request_contact=True)]]
         markup = ReplyKeyboardMarkup(keyboard=btn, resize_keyboard=True, one_time_keyboard=True)
         await message.answer(
             "Привет! Для доступа к курсу нужно подтвердить номер телефона, который вы указывали при оплате.",
@@ -71,7 +72,6 @@ async def cmd_start(message: types.Message):
 async def handle_contact(message: types.Message):
     user_id = message.from_user.id
     phone = message.contact.phone_number
-    
     result = authorize_by_phone(phone, user_id)
     
     if result == "success":
@@ -80,34 +80,36 @@ async def handle_contact(message: types.Message):
     elif result == "blocked":
         await message.answer("❌ Ваш доступ временно заблокирован.")
     else:
-        await message.answer("🚫 Вашего номера нет в списке платных участников. Если это ошибка — напишите админу @kpp_all")
+        await message.answer("🚫 Вашего номера нет в списке. Если это ошибка — напишите админу @kpp_all")
 
 async def send_step(user_id, day, step):
-    # Логика поиска контента в листе Content (как обсуждали ранее)
-    client = get_sheets_client()
-    sheet = client.open_by_key(SHEET_ID).worksheet("Content")
-    records = sheet.get_all_records()
-    
-    data = next((r for r in records if str(r['day']) == str(day) and str(r['step']) == str(step)), None)
-    
-    if not data:
-        await bot.send_message(user_id, "На сегодня это всё. Увидимся завтра!")
-        return
+    try:
+        client = get_sheets_client()
+        sheet = client.open_by_key(SHEET_ID).worksheet("Content")
+        records = sheet.get_all_records()
+        
+        data = next((r for r in records if str(r['day']) == str(day) and str(r['step']) == str(step)), None)
+        
+        if not data:
+            await bot.send_message(user_id, "На сегодня это всё! Увидимся завтра.")
+            return
 
-    await bot.copy_message(
-        chat_id=user_id,
-        from_chat_id=CHANNEL_ID,
-        message_id=data['msg_id'],
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Далее ➡️", callback_data=f"next:{day}:{int(step)+1}")]
-        ])
-    )
+        await bot.copy_message(
+            chat_id=user_id,
+            from_chat_id=CHANNEL_ID,
+            message_id=data['msg_id'],
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Далее ➡️", callback_data=f"next:{day}:{int(step)+1}")]
+            ])
+        )
+    except Exception as e:
+        await bot.send_message(user_id, "Произошла ошибка при загрузке контента. Попробуйте позже.")
 
 @dp.callback_query(F.data.startswith("next:"))
 async def handle_next(callback: types.CallbackQuery):
     _, day, next_step = callback.data.split(":")
     await callback.answer()
-    await send_step(callback.from_user.id, day, next_step)
+    await send_step(callback.from_user.id, day, int(next_step))
 
 # --- Вебхук для Vercel ---
 @app.post("/api/webhook")
