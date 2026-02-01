@@ -19,12 +19,11 @@ app = FastAPI()
 
 def get_sheets_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    # Парсим JSON прямо здесь
     creds_dict = json.loads(G_CREDS_INFO)
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     return gspread.authorize(creds)
 
-# --- Логика авторизации ---
+# --- Логика таблицы ---
 
 def find_user_by_id(user_id):
     try:
@@ -35,6 +34,17 @@ def find_user_by_id(user_id):
     except:
         return None
 
+def update_user_progress(user_id, day):
+    """Записывает текущий день в колонку E (5)"""
+    try:
+        client = get_sheets_client()
+        sheet = client.open_by_key(SHEET_ID).worksheet("Users")
+        cell = sheet.find(str(user_id), in_column=2)
+        if cell:
+            sheet.update_cell(cell.row, 5, str(day))
+    except Exception as e:
+        print(f"Ошибка обновления прогресса: {e}")
+
 def authorize_by_phone(phone, user_id):
     try:
         client = get_sheets_client()
@@ -42,11 +52,9 @@ def authorize_by_phone(phone, user_id):
         clean_phone = phone.replace("+", "").strip()
         cell = sheet.find(clean_phone, in_column=1)
         if cell:
-            # Получаем статус (4-я колонка)
             status = sheet.cell(cell.row, 4).value
             if status == 'blocked':
                 return "blocked"
-            # Записываем ID (2-я колонка)
             sheet.update_cell(cell.row, 2, str(user_id))
             return "success"
         return "not_found"
@@ -102,8 +110,11 @@ async def send_step(user_id, day, step):
                 [InlineKeyboardButton(text="Далее ➡️", callback_data=f"next:{day}:{int(step)+1}")]
             ])
         )
+        # Обновляем прогресс в таблице Users
+        update_user_progress(user_id, day)
+        
     except Exception as e:
-        await bot.send_message(user_id, "Произошла ошибка при загрузке контента. Попробуйте позже.")
+        await bot.send_message(user_id, "Произошла ошибка при загрузке контента.")
 
 @dp.callback_query(F.data.startswith("next:"))
 async def handle_next(callback: types.CallbackQuery):
@@ -111,7 +122,7 @@ async def handle_next(callback: types.CallbackQuery):
     await callback.answer()
     await send_step(callback.from_user.id, day, int(next_step))
 
-# --- Вебхук для Vercel ---
+# --- Вебхук ---
 @app.post("/api/webhook")
 async def webhook(request: Request):
     update = types.Update.model_validate(await request.json(), context={"bot": bot})
