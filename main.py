@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 import gspread
-from datetime import datetime # Добавлено для работы с датами
+from datetime import datetime
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
@@ -27,27 +27,26 @@ def get_sheets_client():
 # --- Логика таблицы ---
 
 def get_user_data(user_id):
-    """Возвращает полные данные пользователя"""
+    """Возвращает полные данные пользователя: строку, статус, текущий день и дату последнего действия."""
     try:
         client = get_sheets_client()
         sheet = client.open_by_key(SHEET_ID).worksheet("Users")
         cell = sheet.find(str(user_id), in_column=2)
         if cell:
-            # Читаем сразу всю строку, чтобы не делать лишних запросов
             row_data = sheet.row_values(cell.row)
-            # Заполняем пустые ячейки, если строка короче 6 колонок
+            # Дозаполняем, если ячейки пустые
             while len(row_data) < 6:
                 row_data.append("")
-            
             return {
                 "row": cell.row, 
                 "status": row_data[3], 
                 "current_day": row_data[4],
-                "last_action": row_data[5], # Дата последнего действия
+                "last_action": row_data[5],
                 "sheet": sheet
             }
         return None
-    except:
+    except Exception as e:
+        print(f"Ошибка получения данных: {e}")
         return None
 
 def authorize_by_phone(phone, user_id):
@@ -63,7 +62,8 @@ def authorize_by_phone(phone, user_id):
             sheet.update_cell(cell.row, 2, str(user_id))
             return "success"
         return "not_found"
-    except:
+    except Exception as e:
+        print(f"Ошибка авторизации: {e}")
         return "error"
 
 # --- Обработка команд ---
@@ -77,7 +77,6 @@ async def cmd_start(message: types.Message):
             await message.answer("❌ Ваш доступ к материалам курса заблокирован.")
             return
         
-        # Берем день из таблицы или 1, если там пусто
         day = int(user_info["current_day"]) if user_info["current_day"] else 1
         await message.answer(f"С возвращением! Продолжаем обучение (День {day}).")
         await send_step(message.from_user.id, day, 1)
@@ -114,32 +113,30 @@ async def send_step(user_id, day, step):
         content_sheet = client.open_by_key(SHEET_ID).worksheet("Content")
         records = content_sheet.get_all_records()
         
-        # Ищем текущий шаг в контенте
         data = next((r for r in records if str(r['day']) == str(day) and str(r['step']) == str(step)), None)
         
         if data:
-            # Есть следующий шаг в текущем дне
+            # Отправка контента с ЗАЩИТОЙ от пересылки
             await bot.copy_message(
                 chat_id=user_id,
                 from_chat_id=CHANNEL_ID,
                 message_id=data['msg_id'],
+                protect_content=True, # Ученик не сможет переслать или сохранить
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="Далее ➡️", callback_data=f"next:{day}:{int(step)+1}")]
                 ])
             )
-            # Обновляем прогресс дня (колонка E)
+            # Запись текущего дня
             user_info["sheet"].update_cell(user_info["row"], 5, str(day))
         else:
-            # Шаги в этом дне закончились. Проверяем, есть ли следующий день.
+            # Логика перехода на следующий день с проверкой даты
             next_day_exists = any(r for r in records if str(r['day']) == str(int(day) + 1))
             
             if next_day_exists:
-                # ПРОВЕРКА ЗАМОРОЗКИ
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 if user_info["last_action"] == today_str:
                     await bot.send_message(user_id, "🌟 На сегодня это всё! Следующий блок откроется завтра.")
                 else:
-                    # Если наступил новый день, предлагаем перейти
                     await bot.send_message(
                         user_id, 
                         f"🏁 День {day} пройден! Готовы начать следующий блок?",
@@ -147,14 +144,14 @@ async def send_step(user_id, day, step):
                             [InlineKeyboardButton(text=f"Начать День {int(day)+1} 🚀", callback_data=f"next:{int(day)+1}:1")]
                         ])
                     )
-                    # Фиксируем дату завершения дня (колонка F)
+                    # Фиксируем дату завершения дня в колонку F
                     user_info["sheet"].update_cell(user_info["row"], 6, today_str)
             else:
                 await bot.send_message(user_id, "🎉 Поздравляем! Вы полностью завершили курс.")
         
     except Exception as e:
-        print(f"Ошибка: {e}")
-        await bot.send_message(user_id, "Произошла ошибка при загрузке. Попробуйте позже.")
+        print(f"Ошибка в send_step: {e}")
+        await bot.send_message(user_id, "Ошибка при загрузке. Попробуйте позже.")
 
 @dp.callback_query(F.data.startswith("next:"))
 async def handle_next(callback: types.CallbackQuery):
