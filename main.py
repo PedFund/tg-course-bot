@@ -96,7 +96,7 @@ async def handle_contact(message: types.Message):
     
     if result == "success":
         await message.answer("✅ Доступ подтвержден! Начинаем.", reply_markup=ReplyKeyboardRemove())
-        await send_step(user_id, 1, 1)
+        await send_step(user_id, 0, 1)
     elif result == "blocked":
         await message.answer("❌ Ваш доступ заблокирован.")
     else:
